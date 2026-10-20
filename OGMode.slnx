@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="ogmm.csproj" />
+  <Project Path="tests/OGMode.Tests/OGMode.Tests.csproj" />
+</Solution>
