@@ -1,0 +1,164 @@
+name: Build & Test
+
+# Chạy tự động khi push/PR vào main, khi push tag v*, hoặc bấm tay: Actions -> Build & Test -> Run workflow.
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Tạo GitHub Release (bản nháp) từ bản build này"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  build-test:
+    name: Build, Test, Publish
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET 10 (LTS)
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: .NET info
+        run: dotnet --info
+
+      - name: Restore
+        run: dotnet restore OGMode.slnx
+
+      - name: Build (Release)
+        run: dotnet build OGMode.slnx -c Release --no-restore
+
+      - name: Unit test + UI smoke test (an toàn, không đụng hệ thống)
+        run: >
+          dotnet test OGMode.slnx -c Release --no-build
+          --filter "FullyQualifiedName!~OGMode.Tests.Integration"
+          --logger "trx;LogFileName=unit-tests.trx"
+          --logger "console;verbosity=normal"
+          --collect:"XPlat Code Coverage"
+          --results-directory TestResults
+
+      - name: Publish (single file, framework-dependent, win-x64)
+        run: >
+          dotnet publish ogmm.csproj -c Release -r win-x64 --self-contained false
+          -p:PublishSingleFile=true -o publish
+
+      - name: Smoke test - chạy thử ogmm.exe
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP 'ogmode-smoke'
+          New-Item -ItemType Directory -Force $data | Out-Null
+          $env:OGMODE_DATA_DIR = $data          # không đụng %AppData% thật
+
+          $exe = Join-Path $PWD 'publish\ogmm.exe'
+          if (-not (Test-Path $exe)) { throw "Không thấy $exe" }
+
+          $p = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 8
+
+          if ($p.HasExited) { throw "ogmm.exe thoát sớm (exit code $($p.ExitCode))" }
+          $log = Join-Path $data 'error.log'
+          if (Test-Path $log) { Get-Content $log; throw "ogmm.exe ghi lỗi vào error.log lúc khởi động" }
+
+          Write-Host "OK: ogmm.exe chạy ổn định sau 8 giây, không có lỗi."
+          Stop-Process -Id $p.Id -Force
+
+      # Máy ảo windows-latest dùng 1 lần rồi bỏ -> thoải mái đổi registry, power plan, dịch vụ, Explorer, xoá cache thật...
+      - name: Integration test (bật/tắt Game Mode thật, registry, power, dịch vụ, RAM, DNS, dọn rác)
+        env:
+          OGMODE_INTEGRATION: "1"
+        run: >
+          dotnet test OGMode.slnx -c Release --no-build
+          --filter "FullyQualifiedName~OGMode.Tests.Integration"
+          --logger "trx;LogFileName=integration-tests.trx"
+          --logger "console;verbosity=detailed"
+          --results-directory TestResults
+
+      - name: Tóm tắt kết quả test
+        if: always()
+        shell: pwsh
+        run: |
+          $lines = @("### Kết quả test", "", "| Nhóm | Tổng | Đạt | Lỗi | Bỏ qua |", "|---|---|---|---|---|")
+          $details = @()
+          $trxs = @(Get-ChildItem TestResults -Filter *.trx -Recurse -ErrorAction SilentlyContinue)
+          if ($trxs.Count -eq 0) { $lines += "| (không có file kết quả) | | | | |" }
+          foreach ($trx in $trxs) {
+            [xml]$x = Get-Content $trx.FullName
+            $c = $x.TestRun.ResultSummary.Counters
+            $lines += "| $($trx.BaseName) | $($c.total) | $($c.passed) | $($c.failed) | $($c.notExecuted) |"
+            foreach ($f in @($x.TestRun.Results.UnitTestResult | Where-Object { $_.outcome -eq 'Failed' })) {
+              $details += "- ``$($f.testName)``: $($f.Output.ErrorInfo.Message)"
+            }
+          }
+          if ($details.Count -gt 0) { $lines += ""; $lines += "#### Test lỗi"; $lines += $details }
+          $lines -join "`n" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload kết quả test + coverage
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: TestResults/
+          if-no-files-found: ignore
+
+      - name: Upload OGMode.exe
+        uses: actions/upload-artifact@v7
+        with:
+          name: OGMode-win-x64
+          path: publish/ogmm.exe
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    needs: build-test
+    # Khi push tag v*  HOẶC bấm tay với release = true
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Tải bản build
+        uses: actions/download-artifact@v8
+        with:
+          name: OGMode-win-x64
+          path: dist
+
+      - name: Tạo Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Select-String -Path ogmm.csproj -Pattern '<Version>(.+)</Version>').Matches[0].Groups[1].Value
+          $tag = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME } else { "v$version" }
+          $zip = "OGMode-v$version-win-x64.zip"
+          Compress-Archive -Path dist\ogmm.exe -DestinationPath $zip -Force
+
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            gh release create $tag $zip dist\ogmm.exe --title "OGMode $tag" --generate-notes
+          } else {
+            gh release create $tag $zip dist\ogmm.exe --title "OGMode $tag" --generate-notes --draft --target $env:GITHUB_SHA
+          }
