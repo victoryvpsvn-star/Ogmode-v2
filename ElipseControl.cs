@@ -18,6 +18,7 @@ namespace ElipseToolDemo
         private Control? _cntrl;
         private int _CornerRadius = 30;
 
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
         public Control TargetControl
         {
 #pragma warning disable CS8603 // Possible null reference return.
@@ -30,6 +31,7 @@ namespace ElipseToolDemo
             }
         }
 
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
         public int CornerRadius
         {
             get { return _CornerRadius; }

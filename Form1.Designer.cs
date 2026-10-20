@@ -438,7 +438,6 @@ namespace ogmm
         private Panel pnlnav;
         private Label title;
         private Button btnclose;
-        private Button btnminimze;
         private Panel panel3;
         private Label label5;
         private Label label4;
