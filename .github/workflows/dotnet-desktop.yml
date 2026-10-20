@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: "Tạo GitHub Release (bản nháp) từ bản build này"
+        description: "Tự động phát hành GitHub Release khi build + test đều đạt (bỏ tick nếu chỉ muốn build thử)"
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -147,7 +147,7 @@ jobs:
           name: OGMode-win-x64
           path: dist
 
-      - name: Tạo Release
+      - name: Tạo / cập nhật Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -157,8 +157,15 @@ jobs:
           $zip = "OGMode-v$version-win-x64.zip"
           Compress-Archive -Path dist\ogmm.exe -DestinationPath $zip -Force
 
-          if ($env:GITHUB_REF -like 'refs/tags/v*') {
-            gh release create $tag $zip dist\ogmm.exe --title "OGMode $tag" --generate-notes
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag đã có -> ghi đè file đính kèm"
+            gh release upload $tag $zip dist\ogmm.exe --clobber
           } else {
-            gh release create $tag $zip dist\ogmm.exe --title "OGMode $tag" --generate-notes --draft --target $env:GITHUB_SHA
+            Write-Host "Tạo release mới $tag"
+            gh release create $tag $zip dist\ogmm.exe --title "OGMode $tag" --generate-notes --latest --target $env:GITHUB_SHA
           }
+          if ($LASTEXITCODE -ne 0) { throw "gh release thất bại (mã $LASTEXITCODE)" }
+
+          $url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/tag/$tag"
+          "### Release: [$tag]($url)" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
